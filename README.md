@@ -123,8 +123,12 @@ curl https://your-proxy.workers.dev/v1/chat/completions \
 
 | 请求路径 | 方法 | 路由行为 | 是否需要鉴权 |
 |----------|------|-----------|--------------|
+| `/` | GET | Helper 帮助页（特性、接入示例、模型列表） | 否 |
+| `/chat` | GET | Web 对话界面（密码门） | 通过 Session Cookie |
+| `/chat/login` | POST | 验证 `PROXY_AUTH_TOKEN`，写入 HttpOnly Cookie | 否 |
+| `/chat/logout` | POST | 清除 Session Cookie | 否 |
 | `/health` | GET | 固定返回 `OK`，用于健康检查 | 否 |
-| `/stats` | GET | 返回实时统计 JSON | 视 `PROXY_AUTH_TOKEN` 而定 |
+| `/stats` | GET | 实时统计可视化页面（`Accept: text/html`）或 JSON（其他 Accept） | 页面：Session Cookie；JSON：视 `PROXY_AUTH_TOKEN` 而定 |
 | `/v1/models` | GET | 透传到 NIM | 否 |
 | `/v1/chat/completions` | POST | 一致性哈希路由 | 视 `PROXY_AUTH_TOKEN` 而定 |
 | `/v1/completions` | POST | 一致性哈希路由 | 视 `PROXY_AUTH_TOKEN` 而定 |
@@ -132,6 +136,32 @@ curl https://your-proxy.workers.dev/v1/chat/completions \
 | `/v1/ranking` | POST | 一致性哈希路由 | 视 `PROXY_AUTH_TOKEN` 而定 |
 | `/v1/*/status/*` | GET | 透传到 NIM（不经过哈希） | 否 |
 | 其他 | ANY | 返回 `404` | — |
+
+### Helper / Chat / Stats 页面
+
+部署后直接访问 Worker 域名，会看到三张页面：
+
+- **`/` Helper 帮助页**：公开访问，展示代理特性、curl / Python 接入示例、路由表，并自动从 `/v1/models` 拉取账号下可用模型。亮色 / 暗色主题切换 + 完整响应式。
+- **`/chat` 聊天界面**：受 `PROXY_AUTH_TOKEN` 保护。首次访问会显示密码门，输入正确口令后浏览器写入 HttpOnly Session Cookie（有效期 7 天），后续访问直接进入对话。聊天 UI 支持：
+  - 模型下拉（来自 `/v1/models`，拉取失败时回退到常见模型列表）
+  - 系统提示词、温度、Max Tokens 调节
+  - 流式（SSE）逐 token 渲染，可随时 Stop 中断（已渲染内容保留）
+  - 多轮上下文持久化到 `localStorage`，刷新页面后恢复
+  - 简单 Markdown 渲染（代码块、行内代码、加粗、换行）
+- **`/stats` 统计面板**：受 `PROXY_AUTH_TOKEN` 保护（与 `/chat` 共享同一 Cookie 会话）。可视化展示：
+  - 4 张核心指标卡（总请求 / 流式 / 错误 / 健康 Key），含 per-hour 速率、错误率、Key 状态
+  - 模型调用量柱状图（CSS 绘制，自动按调用量降序排列）
+  - API Key 实时状态（健康脉冲点 / 冷却倒计时 / 错误数）
+  - 错误按 Key 维度拆分的 chip 列表
+  - 每 5 秒自动刷新，支持手动刷新按钮 + "X 秒前更新" 指示器
+  - 切到后台标签页时停止轮询，回来时立即拉取
+  - 同 URL 的 JSON API（`curl -H "Accept: application/json" /stats`）仍保持原样返回统计 JSON
+
+三张页面共用同一 Cookie 会话：从 `/chat` 登录后，`/stats` 直接放行；从 `/stats` 进入也会看到密码门（提交后跳回 `/stats`）。
+
+Chat UI 与 Stats 面板发起请求时通过浏览器 Cookie 自动携带鉴权，无需在页面内暴露明文 Token。
+
+> 内容协商：`/stats` 通过 `Accept` 区分响应格式 — 浏览器默认 `Accept: text/html,...` 返回页面，`Accept: application/json` 或 `*/*`（curl 默认）返回统计 JSON。
 
 ### 流式请求
 
@@ -191,12 +221,17 @@ nim-proxy/
 ├── src/
 │   ├── index.ts          # 入口，路由分发（HTTP METHOD / PATH）
 │   ├── config.ts         # 环境变量解析 & 模型白名单校验
-│   ├── auth.ts           # Bearer Token 校验 & 401 响应
+│   ├── auth.ts           # Bearer / Cookie 鉴权 & 401 响应
 │   ├── consistentHash.ts # 一致性哈希环 & Key 生命周期管理
 │   ├── proxy.ts          # 请求转发、流式透传、熔断 & 重试逻辑
 │   ├── stats.ts          # 内存级请求/错误统计 & /stats 接口
 │   ├── types.ts          # 全项目 TypeScript 类型定义
-│   └── utils.ts          # CORS headers 等小工具
+│   ├── utils.ts          # CORS headers 等小工具
+│   └── pages/
+│       ├── shared.ts     # 设计语言 CSS、Header、主题切换
+│       ├── helper.ts     # /  Helper 帮助页模板
+│       ├── chat.ts       # /chat 登录页 + 聊天 UI 模板
+│       └── stats.ts      # /stats 可视化面板模板
 ├── wrangler.toml         # Cloudflare Workers 配置（运行时参数）
 ├── tsconfig.json         # TypeScript 配置
 ├── package.json
